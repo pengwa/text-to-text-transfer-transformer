@@ -331,7 +331,8 @@ class HfPyTorchModel(T5Model):
       dynamic_axes["inputs_mask"] = {0: "batch", 1: "seqlen"}
       dynamic_axes["targets_mask"] = {0: "batch", 1: "seqlen_target"}
       dynamic_axes["targets"] = {0: "batch", 1: "seqlen_target"}
-      output_names=["loss", "lm_logits"]
+      #output_names=["loss", "lm_logits"]
+      output_names=["lm_logits"]
       dynamic_axes["lm_logits"] = {0: "batch", 1: "seqlen_target"}
 
       #sample_inputs=[torch.randn(["batch", "seqlen"], torch.float32),
@@ -348,12 +349,12 @@ class HfPyTorchModel(T5Model):
       sample_inputs=[ self.to_tensor(batch["inputs"]),
                       self.to_tensor(batch["inputs_mask"]),
                       self.to_tensor(batch["targets_mask"]),
-                      self.to_tensor(batch["targets"])
+                      self.to_tensor(batch["targets"]),
                     ]
+      #sample_outputs=[ torch.tensor([1], dtype=torch.int64, device=None),
+      #                 torch.randn([1, 1], dtype=torch.float32, device=None)]
 
-      sample_outputs=[ torch.tensor([1], dtype=torch.int64, device=None),
-                       torch.randn([1, 1], dtype=torch.float32, device=None)]
-
+      sample_outputs=[torch.randn([1, 1], dtype=torch.float32, device=None)]
       bashCommand = "rm -rf " + model_name
       import subprocess
       process = subprocess.Popen(bashCommand.split(), stdout=subprocess.PIPE)
@@ -381,6 +382,7 @@ class HfPyTorchModel(T5Model):
           attention_mask=self.to_tensor(batch["inputs_mask"]),
           decoder_attention_mask=self.to_tensor(batch["targets_mask"]),
           labels=self.to_tensor(batch["targets"]),
+          enable_loss="yes",
       )
       print("inputs", batch["inputs"].shape)
       print("inputs_mask",batch["inputs_mask"].shape)
