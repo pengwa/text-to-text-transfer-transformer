@@ -362,16 +362,18 @@ class HfPyTorchModel(T5Model):
       bashCommand = "mkdir " + model_name
       process = subprocess.Popen(bashCommand.split(), stdout=subprocess.PIPE)
       output, error = process.communicate()
-
+      self._model.train()
       torch.onnx._export(self._model, tuple(sample_inputs), model_name + "/" + model_name + ".onnx",
                     input_names=input_names, 
                     output_names=output_names,
                     opset_version=12,
                     dynamic_axes=dynamic_axes,
-                    training=True,
+                    training=torch.onnx.TrainingMode.TRAINING,
                     _retain_param_name=True,
                     example_outputs=tuple(sample_outputs),
-                    use_external_data_format=True)
+                    use_external_data_format=True,
+                    do_constant_folding=False,
+                    verbose=True)
 
       print("==================EXPORT ONNX END=======================")
 
@@ -528,7 +530,7 @@ class HfPyTorchModel(T5Model):
         for metric_fn in task.metric_fns:
           scores = metric_fn(targets, predictions)
           for metric_name, metric_value in scores.items():
-            tag = f"eval/{task.name}/{metric_name}"
+            tag = f"val/{task.name}/{metric_name}"
             self._writer.add_scalar(tag, metric_value, self._step)
             logging.info(
                 "%s at step %d: %.3f", tag, self._step, metric_value
