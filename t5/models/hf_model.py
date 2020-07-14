@@ -95,6 +95,16 @@ import torch.utils.tensorboard
 
 CHECKPOINT_FILE_FORMAT = "model-{}.checkpoint"
 
+import onnx
+global ort_supplement
+import ort_supplement.ort_supplement as ort_supplement
+# replace routine from utils.py as we dont use torch.distributed
+def is_main_process(args):
+    if hasattr(args, 'world_rank'):
+        return args.world_rank == 0
+    if dist.is_available() and dist.is_initialized():
+        return dist.get_rank() == 0
+    return True
 
 def tokens_to_batches(dataset, sequence_length, batch_size, output_features):
   """Convert a dataset of token sequences to batches of padded/masked examples.
@@ -313,98 +323,101 @@ class HfPyTorchModel(T5Model):
     if learning_rate_scheduler:
       learning_rate_scheduler = learning_rate_scheduler(optimizer)
     
+    global_step = self._step
     now = time.time()
     for train_step, batch in enumerate(itertools.islice(ds, steps)):
 
       if not train_step % save_steps:
         # TODO(craffel): Consider saving optimizer and scheduler state.
-        logging.info("Saving checkpoint for step %s", self._step)
-        self.save_checkpoint(self._step)
+        logging.info("Saving checkpoint for step %s", global_step)
+        self.save_checkpoint(global_step)
       print("batch data information: ")
       #print(batch)  
-      print("==========================EXPORT ONNX START==========================")
-      import io
-      dynamic_axes={}
-      f = io.BytesIO()
-      input_names=["inputs", "inputs_mask", "targets_mask", "targets"]
-      dynamic_axes["inputs"] = { 0: "batch", 1: "seqlen"}
-      dynamic_axes["inputs_mask"] = {0: "batch", 1: "seqlen"}
-      dynamic_axes["targets_mask"] = {0: "batch", 1: "seqlen_target"}
-      dynamic_axes["targets"] = {0: "batch", 1: "seqlen_target"}
-      output_names=["loss", "lm_logits"]
-      dynamic_axes["lm_logits"] = {0: "batch", 1: "seqlen_target"}
+      # print("==========================EXPORT ONNX START==========================")
+      # import io
+      # dynamic_axes={}
+      # f = io.BytesIO()
+      # input_names=["inputs", "inputs_mask", "targets_mask", "targets"]
+      # dynamic_axes["inputs"] = { 0: "batch", 1: "seqlen"}
+      # dynamic_axes["inputs_mask"] = {0: "batch", 1: "seqlen"}
+      # dynamic_axes["targets_mask"] = {0: "batch", 1: "seqlen_target"}
+      # dynamic_axes["targets"] = {0: "batch", 1: "seqlen_target"}
+      # output_names=["loss", "lm_logits"]
+      # dynamic_axes["lm_logits"] = {0: "batch", 1: "seqlen_target"}
 
-      #sample_inputs=[torch.randn(["batch", "seqlen"], torch.float32),
-      #  torch.randn(["seqlen"], torch.float32),
-      #  torch.randn(["att_mask_batch", 1, "seqlen", "seqlen"], torch.int64),
-      #]
-      #sample_inputs=[torch.randint(2000, [1, 1],  dtype=torch.int64, device=None),
-      #  torch.randint(20, [1, 1], dtype=torch.int64, device=None),
-      #  torch.randint(20, [1, 1], dtype=torch.int64, device=None),
-      #  torch.randint(20, [1, 1], dtype=torch.int64, device=None),
-      #  torch.randn([1, 1, 1, 1], dtype=torch.float32, device=None),
-      #]
+      # #sample_inputs=[torch.randn(["batch", "seqlen"], torch.float32),
+      # #  torch.randn(["seqlen"], torch.float32),
+      # #  torch.randn(["att_mask_batch", 1, "seqlen", "seqlen"], torch.int64),
+      # #]
+      # #sample_inputs=[torch.randint(2000, [1, 1],  dtype=torch.int64, device=None),
+      # #  torch.randint(20, [1, 1], dtype=torch.int64, device=None),
+      # #  torch.randint(20, [1, 1], dtype=torch.int64, device=None),
+      # #  torch.randint(20, [1, 1], dtype=torch.int64, device=None),
+      # #  torch.randn([1, 1, 1, 1], dtype=torch.float32, device=None),
+      # #]
 
-      sample_inputs=[ self.to_tensor(batch["inputs"]),
-                      self.to_tensor(batch["inputs_mask"]),
-                      self.to_tensor(batch["targets_mask"]),
-                      self.to_tensor(batch["targets"])
-                    ]
+      # sample_inputs=[ self.to_tensor(batch["inputs"]),
+      #                 self.to_tensor(batch["inputs_mask"]),
+      #                 self.to_tensor(batch["targets_mask"]),
+      #                 self.to_tensor(batch["targets"])
+      #               ]
 
-      sample_outputs=[ torch.tensor([1], dtype=torch.int64, device=None),
-                       torch.randn([1, 1], dtype=torch.float32, device=None)]
+      # sample_outputs=[ torch.tensor([1], dtype=torch.int64, device=None),
+      #                  torch.randn([1, 1], dtype=torch.float32, device=None)]
 
-      bashCommand = "rm -rf " + model_name
-      import subprocess
-      process = subprocess.Popen(bashCommand.split(), stdout=subprocess.PIPE)
-      output, error = process.communicate()
-      bashCommand = "mkdir " + model_name
-      process = subprocess.Popen(bashCommand.split(), stdout=subprocess.PIPE)
-      output, error = process.communicate()
+      # bashCommand = "rm -rf " + model_name
+      # import subprocess
+      # process = subprocess.Popen(bashCommand.split(), stdout=subprocess.PIPE)
+      # output, error = process.communicate()
+      # bashCommand = "mkdir " + model_name
+      # process = subprocess.Popen(bashCommand.split(), stdout=subprocess.PIPE)
+      # output, error = process.communicate()
 
-      torch.onnx._export(self._model, tuple(sample_inputs), model_name + "/" + model_name + ".onnx",
-                    input_names=input_names, 
-                    output_names=output_names,
-                    opset_version=12,
-                    dynamic_axes=dynamic_axes,
-                    training=True,
-                    _retain_param_name=True,
-                    example_outputs=tuple(sample_outputs),
-                    use_external_data_format=True)
+      # torch.onnx._export(self._model, tuple(sample_inputs), model_name + "/" + model_name + ".onnx",
+      #               input_names=input_names, 
+      #               output_names=output_names,
+      #               opset_version=12,
+      #               dynamic_axes=dynamic_axes,
+      #               training=True,
+      #               _retain_param_name=True,
+      #               example_outputs=tuple(sample_outputs),
+      #               use_external_data_format=True)
 
-      print("==================EXPORT ONNX END=======================")
+      # print("==================EXPORT ONNX END=======================")
 
 
       self._model.zero_grad()
-      outputs = self._model(
-          input_ids=self.to_tensor(batch["inputs"]),
-          attention_mask=self.to_tensor(batch["inputs_mask"]),
-          decoder_attention_mask=self.to_tensor(batch["targets_mask"]),
-          labels=self.to_tensor(batch["targets"]),
-      )
-      print("inputs", batch["inputs"].shape)
-      print("inputs_mask",batch["inputs_mask"].shape)
-      print("targets_mask",batch["targets_mask"].shape)
-      print("targets",batch["targets"].shape)
+      # outputs = self._model(
+      #     input_ids=self.to_tensor(batch["inputs"]),
+      #     attention_mask=self.to_tensor(batch["inputs_mask"]),
+      #     decoder_attention_mask=self.to_tensor(batch["targets_mask"]),
+      #     labels=self.to_tensor(batch["targets"]),
+      # )
+      # print("inputs", batch["inputs"].shape)
+      # print("inputs_mask",batch["inputs_mask"].shape)
+      # print("targets_mask",batch["targets_mask"].shape)
+      # print("targets",batch["targets"].shape)
 
-      loss = outputs[0]
-      print("loss", loss.detach().numpy())
-      print("lm_logits", outputs[1].detach().numpy().shape)
-      loss.backward()
-      optimizer.step()
-      if learning_rate_scheduler:
-        learning_rate_scheduler.step()
+      # loss = outputs[0]
+      # print("loss", loss.detach().numpy())
+      # print("lm_logits", outputs[1].detach().numpy().shape)
+      # loss.backward()
+      # optimizer.step()
+      # if learning_rate_scheduler:
+      #   learning_rate_scheduler.step()
 
-      self._writer.add_scalar(
-          "loss", loss.detach().cpu().numpy(), self._step
-      )
-      self._writer.add_scalar("step/s", 1 / (time.time() - now), self._step)
-      now = time.time()
-      self._step += 1
-      break
+      loss, global_step = ort_supplement.run_ort_training_step(args, global_step, training_steps, model, batch)
+      if (train_step + 1) % args.gradient_accumulation_steps == 0:
+        self._writer.add_scalar(
+            "loss", loss.detach().cpu().numpy(), global_step
+        )
 
-    logging.info("Saving final checkpoint for step %s", self._step)
-    self.save_checkpoint(self._step)
+        self._writer.add_scalar("global step/s", 1 / (time.time() - now), global_step)
+        now = time.time()
+        global_step += 1
+
+    #logging.info("Saving final checkpoint for step %s", global_step)
+    #self.save_checkpoint(global_step)
 
   def eval(
       self,
