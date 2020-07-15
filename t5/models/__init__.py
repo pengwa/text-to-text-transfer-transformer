@@ -17,3 +17,5 @@
 import t5.models.mesh_transformer
 from t5.models.mtf_model import MtfModel
 from t5.models.hf_model import HfPyTorchModel
+from t5.models.ort_supplement import *
+from t5.models.lr_schedules import *

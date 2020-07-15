@@ -65,19 +65,32 @@ def t5_model_description(args):
     micro_batch = args.train_batch_size // args.gradient_accumulation_steps
     inputs_desc = IODescription('inputs', [args.train_batch_size, args.max_seq_length], torch.int64, num_classes = vocab_size)
     inputs_mask_desc = IODescription('inputs_mask', [args.train_batch_size, args.max_seq_length], torch.int64, num_classes = 2)
-    targets_desc = IODescription('targets', [args.train_batch_size, args.output_max_seq_length], torch.int64, num_classes = vocab_size)
     targets_mask_desc = IODescription('targets_mask', [args.train_batch_size, args.output_seq_length], torch.int64, num_classes = 2)
+    targets_desc = IODescription('targets', [args.train_batch_size, args.output_seq_length], torch.int64, num_classes = vocab_size)
 
     loss_desc = IODescription('loss', [], torch.float32)
-    return ModelDescription([inputs_desc, inputs_mask_desc, targets_desc, targets_mask_desc], [loss_desc])
+    return ModelDescription([inputs_desc, inputs_mask_desc, targets_mask_desc, targets_desc], [loss_desc])
 
 # for opset 10
 #from ort_supplement.onnx_transforms.model_transform import add_name, fix_transpose, add_expand_shape, process_concat, process_dropout, handle_expand_input_is_not_constant_case, fix_dim, fix_expand
 
 #from ort_supplement.onnx_transforms.layer_norm_transform import layer_norm_transform
 
+import sys
+import onnx
+from onnx import helper, shape_inference
+from onnx import TensorProto
+import numpy as np
+from onnx import numpy_helper
+
+def add_name(model):
+    i = 0
+    for node in model.graph.node:
+       node.name = '%s_%d' %(node.op_type, i)
+       i += 1
+
 def postprocess_model(model):
-    #add_name(model)
+    add_name(model)
     # # for opset 10 ..
     # handle_expand_input_is_not_constant_case(model)
     # fix_expand(model)
@@ -87,7 +100,7 @@ def postprocess_model(model):
     #add_expand_shape(model)
     #layer_norm_transform(model)
 
-def create_ort_trainer(args, device, model):
+def create_ort_trainer(args, device, model, postprocess_model):
     # set GPU memory limitation
     from onnxruntime.capi._pybind_state import set_cuda_mem_limit
     ort_cuda_mem_limit_in_gbs = args.gpu_memory_limit_gb
@@ -111,12 +124,11 @@ def create_ort_trainer(args, device, model):
     model = ORTTrainer(model, None, t5_model_description(args), "LambOptimizer", 
         map_optimizer_attributes,
         IODescription('Learning_Rate', [1,], torch.float32),
-        device, postprocess_model=postprocess_model, 
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        device, gradient_accumulation_steps=args.gradient_accumulation_steps,
         world_rank=args.world_rank, world_size=args.world_size,
         use_mixed_precision = True if args.fp16 else False,
         allreduce_post_accumulation = True if args.allreduce_post_accumulation else False,
-        partition_optimizer = True if args.partition_optimizer else False,
+        deepspeed_zero_stage = True if args.partition_optimizer else False,
         _opset_version = 12)
 
     if args.fp16:
@@ -124,32 +136,29 @@ def create_ort_trainer(args, device, model):
 
     return model
 
-from ort_supplement.lr_schedules import SCHEDULES
+from t5.models.lr_schedules import *
 def get_lr(args, training_steps, schedule='warmup_poly'):
     if args.max_steps == -1:
         return args.learning_rate
-
     schedule_fct = SCHEDULES[schedule]
     return args.learning_rate * schedule_fct(training_steps / args.max_steps, args.warmup_proportion)
 
-def run_ort_training_step(args, global_step, training_steps, model, batch, to_tensor):
-    input_ids=to_tensor(batch["inputs"])
-    attention_mask=to_tensor(batch["inputs_mask"])
-    decoder_attention_mask=to_tensor(batch["targets_mask"])
-    labels=to_tensor(batch["targets"])
-
+def run_ort_training_step(args, global_step, training_steps, model, batch):
+    input_ids, attention_mask, decoder_attention_mask, labels = batch
     lr = get_lr(args, global_step, args.schedule)
     learning_rate = torch.tensor([lr])
     if args.fp16:
         loss_scale = torch.tensor([args.ort_loss_scale.loss_scale_])
-        loss = model.train_step(input_ids, attention_mask,decoder_attention_mask, labels, learning_rate, loss_scale)
+        loss = model.train_step(input_ids, attention_mask, decoder_attention_mask, labels, learning_rate, loss_scale)
         all_finite = 1
         if isinstance(loss, (list, tuple)):
             assert len(loss) == 2
             loss, all_finite = loss
     else:
-        loss = model(input_ids, segment_ids, input_mask, masked_lm_labels, next_sentence_labels, learning_rate)
-    if training_steps % args.gradient_accumulation_steps == 0:
+        print(len(batch))
+        print(learning_rate)
+        loss = model(input_ids, attention_mask, decoder_attention_mask, labels, learning_rate)
+    if (training_steps + 1) % args.gradient_accumulation_steps == 0:
         if args.fp16:
             args.ort_loss_scale.update_loss_scale(all_finite.item())
         global_step += 1
