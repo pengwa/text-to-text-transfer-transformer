@@ -160,6 +160,15 @@ def write_lines_to_file(lines, filename):
   with tf.io.gfile.GFile(filename, "w") as output_file:
     output_file.write("\n".join([str(l) for l in lines]))
 
+class t5_generator(torch.nn.Module):
+    def __init__(self, model):
+        super(t5_generator, self).__init__()
+        self.model_ = model
+
+    def forward(self, input_ids):
+        preds_score = self.model_.generate(input_ids)
+        return preds_score
+
 
 class HfPyTorchModel(T5Model):
   """Wrapper class for Hugging Face Transformers PyTorch T5 model."""
@@ -326,14 +335,15 @@ class HfPyTorchModel(T5Model):
       import io
       dynamic_axes={}
       f = io.BytesIO()
-      input_names=["inputs", "inputs_mask", "targets_mask", "targets"]
+      input_names=["inputs"] #, "inputs_mask", "targets_mask", "targets"]
       dynamic_axes["inputs"] = { 0: "batch", 1: "seqlen"}
-      dynamic_axes["inputs_mask"] = {0: "batch", 1: "seqlen"}
-      dynamic_axes["targets_mask"] = {0: "batch", 1: "seqlen_target"}
-      dynamic_axes["targets"] = {0: "batch", 1: "seqlen_target"}
+      #dynamic_axes["inputs_mask"] = {0: "batch", 1: "seqlen"}
+      #dynamic_axes["targets_mask"] = {0: "batch", 1: "seqlen_target"}
+      #dynamic_axes["targets"] = {0: "batch", 1: "seqlen_target"}
       #output_names=["loss", "lm_logits"]
-      output_names=["lm_logits"]
-      dynamic_axes["lm_logits"] = {0: "batch", 1: "seqlen_target"}
+      #output_names=["lm_logits"]
+      output_names=["outputs"]
+      dynamic_axes["outputs"] = {0: "batch", 1: "seqlen_target"}
 
       #sample_inputs=[torch.randn(["batch", "seqlen"], torch.float32),
       #  torch.randn(["seqlen"], torch.float32),
@@ -345,12 +355,9 @@ class HfPyTorchModel(T5Model):
       #  torch.randint(20, [1, 1], dtype=torch.int64, device=None),
       #  torch.randn([1, 1, 1, 1], dtype=torch.float32, device=None),
       #]
-
-      sample_inputs=[ self.to_tensor(batch["inputs"]),
-                      self.to_tensor(batch["inputs_mask"]),
-                      self.to_tensor(batch["targets_mask"]),
-                      self.to_tensor(batch["targets"]),
-                    ]
+      self._model.eval()
+      t5_m = t5_generator(self._model)
+      sample_inputs=[ self.to_tensor(batch["inputs"])]
       #sample_outputs=[ torch.tensor([1], dtype=torch.int64, device=None),
       #                 torch.randn([1, 1], dtype=torch.float32, device=None)]
 
@@ -362,13 +369,13 @@ class HfPyTorchModel(T5Model):
       bashCommand = "mkdir " + model_name
       process = subprocess.Popen(bashCommand.split(), stdout=subprocess.PIPE)
       output, error = process.communicate()
-      self._model.train()
-      torch.onnx._export(self._model, tuple(sample_inputs), model_name + "/" + model_name + ".onnx",
+      #self._model.train()
+      torch.onnx._export(t5_m, tuple(sample_inputs), model_name + "/" + model_name + ".onnx",
                     input_names=input_names, 
                     output_names=output_names,
                     opset_version=12,
                     dynamic_axes=dynamic_axes,
-                    training=torch.onnx.TrainingMode.TRAINING,
+                    #training=torch.onnx.TrainingMode.TRAINING,
                     _retain_param_name=True,
                     example_outputs=tuple(sample_outputs),
                     use_external_data_format=True,
@@ -376,7 +383,7 @@ class HfPyTorchModel(T5Model):
                     verbose=True)
 
       print("==================EXPORT ONNX END=======================")
-
+      
 
       self._model.zero_grad()
       outputs = self._model(
