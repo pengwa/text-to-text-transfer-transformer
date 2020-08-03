@@ -18,6 +18,8 @@ def setup_onnxruntime_with_mpi(args):
         args.local_rank = comm.Get_rank() % torch.cuda.device_count()
         args.world_rank = comm.Get_rank()
         args.world_size = comm.Get_size()
+        args.data_parallel_size = args.world_size // args.horizontal_parallel_size // args.pipeline_parallel_size
+        print("data_parallel_size: ", args.data_parallel_size, ", args.horizontal_parallel_size ", args.horizontal_parallel_size)
 
         torch.cuda.set_device(args.local_rank)
         device = torch.device("cuda", args.local_rank)
@@ -63,10 +65,10 @@ def t5_model_description(args):
 
     # set concrete input sizes to permit optimization
     micro_batch = args.train_batch_size // args.gradient_accumulation_steps
-    inputs_desc = IODescription('inputs', [args.train_batch_size, args.max_seq_length], torch.int64, num_classes = vocab_size)
-    inputs_mask_desc = IODescription('inputs_mask', [args.train_batch_size, args.max_seq_length], torch.int64, num_classes = 2)
-    targets_mask_desc = IODescription('targets_mask', [args.train_batch_size, args.output_seq_length], torch.int64, num_classes = 2)
-    targets_desc = IODescription('targets', [args.train_batch_size, args.output_seq_length], torch.int64, num_classes = vocab_size)
+    inputs_desc = IODescription('inputs', [args.train_batch_size, args.input_sequence_length], torch.int64, num_classes = vocab_size)
+    inputs_mask_desc = IODescription('inputs_mask', [args.train_batch_size, args.input_sequence_length], torch.int64, num_classes = 2)
+    targets_mask_desc = IODescription('targets_mask', [args.train_batch_size, args.target_sequence_length], torch.int64, num_classes = 2)
+    targets_desc = IODescription('targets', [args.train_batch_size, args.target_sequence_length], torch.int64, num_classes = vocab_size)
 
     loss_desc = IODescription('loss', [], torch.float32)
     return ModelDescription([inputs_desc, inputs_mask_desc, targets_mask_desc, targets_desc], [loss_desc])
@@ -115,21 +117,24 @@ def create_ort_trainer(args, device, model, postprocess_model):
                 no_decay = True
                 break
         if no_decay:
-            return {"alpha": 0.9, "beta": 0.999, "lambda": 0.0, "epsilon": 1e-6}
+            return {"alpha": 0.9, "beta": 0.999, "lambda": 0.0, "epsilon": 1e-6, "do_bias_correction": 0, "weight_decay_mode": 0}
         else:
-            return {"alpha": 0.9, "beta": 0.999, "lambda": 0.01, "epsilon": 1e-6}
+            return {"alpha": 0.9, "beta": 0.999, "lambda": 0.01, "epsilon": 1e-6, "do_bias_correction": 0, "weight_decay_mode": 0}
 
     # we request ORTTrainer to create a LambOptimizer with given optimizer_attributes. 
     # train_step does forward, backward, and optimize step.
-    model = ORTTrainer(model, None, t5_model_description(args), "LambOptimizer", 
+    model = ORTTrainer(model, None, t5_model_description(args), "AdamOptimizer", 
         map_optimizer_attributes,
-        IODescription('Learning_Rate', [1,], torch.float32),
+        IODescription('Learning_Rate', [args.learning_rate,], torch.float32),
         device, gradient_accumulation_steps=args.gradient_accumulation_steps,
         world_rank=args.world_rank, world_size=args.world_size,
         use_mixed_precision = True if args.fp16 else False,
         allreduce_post_accumulation = True if args.allreduce_post_accumulation else False,
-        deepspeed_zero_stage = True if args.partition_optimizer else False,
-        _opset_version = 12)
+        deepspeed_zero_stage = args.deepspeed_zero_stage,
+        _opset_version = 12,
+        data_parallel_size=args.data_parallel_size,
+        horizontal_parallel_size=args.horizontal_parallel_size,
+        pipeline_parallel_size=args.pipeline_parallel_size)
 
     if args.fp16:
         setattr(args, 'ort_loss_scale', LossScaler(model.loss_scale_input_name, True, up_scale_window=2000))
@@ -145,7 +150,8 @@ def get_lr(args, training_steps, schedule='warmup_poly'):
 
 def run_ort_training_step(args, global_step, training_steps, model, batch):
     input_ids, attention_mask, decoder_attention_mask, labels = batch
-    lr = get_lr(args, global_step, args.schedule)
+    # hardcode learning rate referring to https://github.com/google-research/text-to-text-transfer-transformer/issues/230
+    lr = args.learning_rate #get_lr(args, global_step, args.schedule)
     learning_rate = torch.tensor([lr])
     if args.fp16:
         loss_scale = torch.tensor([args.ort_loss_scale.loss_scale_])
@@ -155,8 +161,6 @@ def run_ort_training_step(args, global_step, training_steps, model, batch):
             assert len(loss) == 2
             loss, all_finite = loss
     else:
-        print(len(batch))
-        print(learning_rate)
         loss = model(input_ids, attention_mask, decoder_attention_mask, labels, learning_rate)
     if (training_steps + 1) % args.gradient_accumulation_steps == 0:
         if args.fp16:

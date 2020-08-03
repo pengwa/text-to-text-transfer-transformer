@@ -318,7 +318,12 @@ class HfPyTorchModel(T5Model):
        num_warmup_steps=100)`.
     """
     self._model.train()
-    ds = get_dataset(mixture_or_task_name, sequence_length, split, batch_size)
+    tf.debugging.set_log_device_placement(True)
+    ds = None
+    # Place tensors on the CPU
+    with tf.device('/CPU:0'):
+      ds = get_dataset(mixture_or_task_name, sequence_length, split, batch_size)
+
     # Repeat dataset forever
     ds = itertools.cycle(ds)
     optimizer = optimizer(self._model.parameters())
@@ -327,51 +332,62 @@ class HfPyTorchModel(T5Model):
     
     global_step = self._step
     now = time.time()
-    for train_step, batch in enumerate(itertools.islice(ds, steps)):
+    device = self._device
+    model = self._model
+    ### ORT Specific START ###
+    use_ort = True
+    if use_ort:
+      for train_step, batch in enumerate(itertools.islice(ds, steps)):
+        input_ids=self.to_tensor(batch["inputs"])
+        attention_mask=self.to_tensor(batch["inputs_mask"])
+        decoder_attention_mask=self.to_tensor(batch["targets_mask"])
+        labels=self.to_tensor(batch["targets"])
+        device = setup_onnxruntime_with_mpi(self.args)
+        model = create_ort_trainer(self.args, device, self._model, postprocess_model)
+        break
+    ### ORT Specific END ###
 
+    for train_step, batch in enumerate(itertools.islice(ds, steps)):
       if not train_step % save_steps:
         # TODO(craffel): Consider saving optimizer and scheduler state.
         logging.info("Saving checkpoint for step %s", global_step)
         self.save_checkpoint(global_step)
-      print("batch data information: ")
-      self._model.zero_grad()
-
-      # outputs = self._model(
-      #     input_ids=self.to_tensor(batch["inputs"]),
-      #     attention_mask=self.to_tensor(batch["inputs_mask"]),
-      #     decoder_attention_mask=self.to_tensor(batch["targets_mask"]),
-      #     labels=self.to_tensor(batch["targets"]),
-      # )
-      # print("inputs", batch["inputs"].shape)
-      # print("inputs_mask", batch["inputs_mask"].shape)
-      # print("targets_mask", batch["targets_mask"].shape)
-      # print("targets", batch["targets"].shape)
-
-      # loss = outputs[0]
-      # print("loss", loss.detach().numpy())
-      # print("lm_logits", outputs[1].detach().numpy().shape)
-      # loss.backward()
-      # optimizer.step()
-      # if learning_rate_scheduler:
-      #   learning_rate_scheduler.step()
-
       input_ids=self.to_tensor(batch["inputs"])
       attention_mask=self.to_tensor(batch["inputs_mask"])
       decoder_attention_mask=self.to_tensor(batch["targets_mask"])
       labels=self.to_tensor(batch["targets"])
-      model = create_ort_trainer(self.args, self._device, self._model, postprocess_model)
-      batch = (input_ids, attention_mask, decoder_attention_mask, labels)
-      loss, global_step = run_ort_training_step(self.args, global_step, train_step, model, batch)
-      if (train_step + 1) % self.args.gradient_accumulation_steps == 0:
-        self._writer.add_scalar(
-            "loss", loss.detach().cpu().numpy(), global_step
+      if not use_ort:
+        self._model.zero_grad()
+        outputs = self._model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            decoder_attention_mask=decoder_attention_mask,
+            labels=labels,
         )
+        #print("inputs", batch["inputs"].shape)
+        #print("inputs_mask", batch["inputs_mask"].shape)
+        #print("targets_mask", batch["targets_mask"].shape)
+        #print("targets", batch["targets"].shape)
 
-        self._writer.add_scalar("global step/s", 1 / (time.time() - now), global_step)
-        now = time.time()
-        global_step += 1
-      print("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$===")
-      break
+        loss = outputs[0]
+        #print("loss", loss.detach().numpy())
+        #print("lm_logits", outputs[1].detach().numpy().shape)
+        loss.backward()
+        optimizer.step()
+        if learning_rate_scheduler:
+          learning_rate_scheduler.step()
+        print("pytorch backend - train_step: {0}, global_step: {1}, loss: {2}".format(train_step, global_step,  loss.detach().cpu().numpy()))
+      else:
+        batch_inputs = (input_ids, attention_mask, decoder_attention_mask, labels)
+        loss, global_step = run_ort_training_step(self.args, global_step, train_step, model, batch_inputs)
+        print("ort backend - train_step: {0}, global_step: {1}, loss: {2}".format(train_step, global_step - 1, loss.detach().cpu().numpy()))
+        if (train_step + 1) % self.args.gradient_accumulation_steps == 0:
+          self._writer.add_scalar(
+              "loss", loss.detach().cpu().numpy(), global_step - 1
+          )
+
+          self._writer.add_scalar("global step/s", 1 / (time.time() - now), global_step - 1)
+          now = time.time()
     #logging.info("Saving final checkpoint for step %s", global_step)
     #self.save_checkpoint(global_step)
 

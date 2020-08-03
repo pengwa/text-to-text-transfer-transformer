@@ -725,7 +725,6 @@ class Task(DatasetProviderBase):
     self.assert_cached()
     with tf.io.gfile.GFile(get_info_path(self.cache_dir, split)) as f:
       split_info = json.load(f)
-
     # Use `FixedLenSequenceFeature` for sequences with variable length.
     def _feature_config(shape, dtype):
       if shape and shape[0] is None:
@@ -735,7 +734,6 @@ class Task(DatasetProviderBase):
     feature_desc = {
         feat: _feature_config(**desc)
         for feat, desc in split_info["features"].items()}
-
     ds = tf.data.Dataset.list_files(
         "%s-*-of-*%d" % (
             get_tfrecord_prefix(self.cache_dir, split),
@@ -745,10 +743,12 @@ class Task(DatasetProviderBase):
         tf.data.TFRecordDataset,
         cycle_length=16, block_length=16,
         num_parallel_calls=tf.data.experimental.AUTOTUNE)
+
     ds = ds.map(lambda ex: tf.parse_single_example(ex, feature_desc),
                 num_parallel_calls=tf.data.experimental.AUTOTUNE)
     if self.get_cached_stats(split)["examples"] <= _MAX_EXAMPLES_TO_MEM_CACHE:
       ds = ds.cache()
+
     return ds
 
   def postprocess_fn(self, string, **postprocess_kwargs):
