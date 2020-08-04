@@ -166,7 +166,7 @@ class t5_generator(torch.nn.Module):
         self.model_ = model
 
     def forward(self, input_ids):
-        preds_score = self.model_.generate(input_ids)
+        preds_score = self.model_.generate(input_ids=input_ids)
         return preds_score
 
 
@@ -314,7 +314,7 @@ class HfPyTorchModel(T5Model):
         `functools.partial(transformers.get_constant_schedule_with_warmup,
        num_warmup_steps=100)`.
     """
-    self._model.train()
+    #self._model.train()
     ds = get_dataset(mixture_or_task_name, sequence_length, split, batch_size)
     # Repeat dataset forever
     ds = itertools.cycle(ds)
@@ -357,11 +357,14 @@ class HfPyTorchModel(T5Model):
       #]
       self._model.eval()
       t5_m = t5_generator(self._model)
+      t5_m.eval()
+      print(self.to_tensor(batch["inputs"]))
+      print("first part >>>>>>>>>>>>>>>>>>>>>>>>>>>")
       sample_inputs=[ self.to_tensor(batch["inputs"])]
       #sample_outputs=[ torch.tensor([1], dtype=torch.int64, device=None),
       #                 torch.randn([1, 1], dtype=torch.float32, device=None)]
 
-      sample_outputs=[torch.randn([1, 1], dtype=torch.float32, device=None)]
+      sample_outputs=[torch.randn([32, 4], dtype=torch.float32, device=None)]
       bashCommand = "rm -rf " + model_name
       import subprocess
       process = subprocess.Popen(bashCommand.split(), stdout=subprocess.PIPE)
