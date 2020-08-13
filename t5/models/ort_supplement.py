@@ -65,10 +65,10 @@ def t5_model_description(args):
 
     # set concrete input sizes to permit optimization
     micro_batch = args.train_batch_size // args.gradient_accumulation_steps
-    inputs_desc = IODescription('inputs', [args.train_batch_size, args.input_sequence_length], torch.int64, num_classes = vocab_size)
-    inputs_mask_desc = IODescription('inputs_mask', [args.train_batch_size, args.input_sequence_length], torch.int64, num_classes = 2)
-    targets_mask_desc = IODescription('targets_mask', [args.train_batch_size, args.target_sequence_length], torch.int64, num_classes = 2)
-    targets_desc = IODescription('targets', [args.train_batch_size, args.target_sequence_length], torch.int64, num_classes = vocab_size)
+    inputs_desc = IODescription('inputs', [args.train_batch_size, args.max_input_seq_length], torch.int64, num_classes = vocab_size)
+    inputs_mask_desc = IODescription('inputs_mask', [args.train_batch_size, args.max_input_seq_length], torch.int64, num_classes = 2)
+    targets_mask_desc = IODescription('targets_mask', [args.train_batch_size, args.max_output_seq_length], torch.int64, num_classes = 2)
+    targets_desc = IODescription('targets', [args.train_batch_size, args.max_output_seq_length], torch.int64, num_classes = vocab_size)
 
     loss_desc = IODescription('loss', [], torch.float32)
     return ModelDescription([inputs_desc, inputs_mask_desc, targets_mask_desc, targets_desc], [loss_desc])

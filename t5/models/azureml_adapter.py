@@ -16,10 +16,11 @@ def set_environment_variables_for_nccl_backend(single_node=False, IB=False):
     print ('IB flag:' + str(IB))
     if IB:
         print('IB Enabled')
-        os.environ['NCCL_SOCKET_IFNAME'] = 'eth0'
+        #os.environ['NCCL_SOCKET_IFNAME'] = 'eth0'
         os.environ['NCCL_IB_DISABLE'] = '0'
     else:
-        os.environ['NCCL_SOCKET_IFNAME'] = '^docker0,lo'
+        pass
+        #os.environ['NCCL_SOCKET_IFNAME'] = '^docker0,lo'
         #os.environ['NCCL_SOCKET_IFNAME'] = 'ib0'
     print('RANK = {}'.format(os.environ['RANK']))
     print('WORLD_SIZE = {}'.format(os.environ['WORLD_SIZE']))

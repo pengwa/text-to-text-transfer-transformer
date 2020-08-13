@@ -92,6 +92,9 @@ import tensorflow.compat.v1 as tf
 import tensorflow_datasets as tfds
 import torch
 import torch.utils.tensorboard
+from filelock import Timeout, FileLock
+from os import path
+import onnx
 
 CHECKPOINT_FILE_FORMAT = "model-{}.checkpoint"
 
@@ -171,6 +174,10 @@ def write_lines_to_file(lines, filename):
   with tf.io.gfile.GFile(filename, "w") as output_file:
     output_file.write("\n".join([str(l) for l in lines]))
 
+def check_onnx_model_exists():
+    exported_model_dir = os.path.join(str(os.environ['T5_MODEL_PATH']), "t5/models/" + str(os.environ['T5_MODEL_NAME']))
+    exported_model_file_name = os.path.join(exported_model_dir, str(os.environ['T5_MODEL_NAME']) + ".onnx")
+    return [path.exists(exported_model_file_name), exported_model_file_name]
 
 class HfPyTorchModel(T5Model):
   """Wrapper class for Hugging Face Transformers PyTorch T5 model."""
@@ -197,18 +204,24 @@ class HfPyTorchModel(T5Model):
           model_spec
       )
     elif isinstance(model_spec, transformers.T5Config):
-      self._model = transformers.T5ForConditionalGeneration(model_spec)
+      if check_onnx_model_exists()[0] is True:
+        self._model = None
+        print(" Do not need PyTorch model any more")
+      else:
+        print("Start building PyTroch T5ForConditionalGeneration model")
+        self._model = transformers.T5ForConditionalGeneration(model_spec)
+        print("End building PyTroch T5ForConditionalGeneration model")
     else:
       raise ValueError("model_spec should be a string or T5Config.")
 
-    tf.io.gfile.makedirs(model_dir)
-    self._writer = torch.utils.tensorboard.writer.SummaryWriter(model_dir)
-    self._model_dir = model_dir
+    #tf.io.gfile.makedirs(model_dir)
+    #self._writer = torch.utils.tensorboard.writer.SummaryWriter(model_dir)
+    #self._model_dir = model_dir
     self._device = device
-    if self._device.type == "cuda":
+    if self._device.type == "cuda" and self._model:
       self._model.cuda()
     self._step = 0
-    self.load_latest_checkpoint()
+    #self.load_latest_checkpoint()
     self.to_tensor = functools.partial(torch.as_tensor, device=self._device)
     self.args = args
 
@@ -226,8 +239,9 @@ class HfPyTorchModel(T5Model):
     Args:
       step: int, the current training step.
     """
-    path = os.path.join(self._model_dir, CHECKPOINT_FILE_FORMAT.format(step))
-    torch.save(self._model.state_dict(), path)
+    pass
+    #path = os.path.join(self._model_dir, CHECKPOINT_FILE_FORMAT.format(step))
+    #torch.save(self._model.state_dict(), path)
 
   def load_checkpoint(self, step, model_dir=None):
     """Load the model parameters from a checkpoint at a given step.
@@ -237,7 +251,7 @@ class HfPyTorchModel(T5Model):
       model_dir: str, the directory of the checkpoint to load or None to use
         this model's directory.
     """
-    model_dir = model_dir or self._model_dir
+    model_dir = model_dir #or self._model_dir
     path = os.path.join(model_dir, CHECKPOINT_FILE_FORMAT.format(step))
     logging.info("Loading from %s", path)
     self._model.load_state_dict(torch.load(path))
@@ -254,7 +268,7 @@ class HfPyTorchModel(T5Model):
       A list of ints corresponding to all checkpoint steps, or None if there
         are no checkpoints in the model directory.
     """
-    model_dir = model_dir or self._model_dir
+    model_dir = model_dir #or self._model_dir
     checkpoint_files = tf.io.gfile.glob(
         os.path.join(model_dir, CHECKPOINT_FILE_FORMAT.format("*"))
     )
@@ -317,41 +331,58 @@ class HfPyTorchModel(T5Model):
         `functools.partial(transformers.get_constant_schedule_with_warmup,
        num_warmup_steps=100)`.
     """
-    self._model.train()
+    logging.info("Enter Train Function Body")
+    if self._model:
+      self._model.train()
     tf.debugging.set_log_device_placement(True)
     ds = None
+
+    lock = FileLock(mixture_or_task_name + "load.lock")
+    lock.acquire()
     # Place tensors on the CPU
     with tf.device('/CPU:0'):
       ds = get_dataset(mixture_or_task_name, sequence_length, split, batch_size)
+    
+    lock.release()
 
     # Repeat dataset forever
-    ds = itertools.cycle(ds)
-    optimizer = optimizer(self._model.parameters())
-    if learning_rate_scheduler:
-      learning_rate_scheduler = learning_rate_scheduler(optimizer)
-    
+    ds = itertools.cycle(ds)   
     global_step = self._step
     now = time.time()
     device = self._device
-    model = self._model
+    if self._model:
+      model = self._model
+    else:
+      if check_onnx_model_exists()[0] is not True:
+        raise ValueError("Unexpected results")
+      model = onnx.load(check_onnx_model_exists()[1])
+
     ### ORT Specific START ###
     use_ort = True
     if use_ort:
+      logging.info("Use ORT backend for training, Exporting model to onnx")
       for train_step, batch in enumerate(itertools.islice(ds, steps)):
         input_ids=self.to_tensor(batch["inputs"])
         attention_mask=self.to_tensor(batch["inputs_mask"])
         decoder_attention_mask=self.to_tensor(batch["targets_mask"])
         labels=self.to_tensor(batch["targets"])
         device = setup_onnxruntime_with_mpi(self.args)
-        model = create_ort_trainer(self.args, device, self._model, postprocess_model)
+        model = create_ort_trainer(self.args, device, model, postprocess_model)
         break
+
     ### ORT Specific END ###
 
+    if not use_ort:
+      ptimizer = optimizer(self._model.parameters())
+      if learning_rate_scheduler:
+        learning_rate_scheduler = learning_rate_scheduler(optimizer)
+
+    logging.info("Start Training Loop")
     for train_step, batch in enumerate(itertools.islice(ds, steps)):
-      if not train_step % save_steps:
-        # TODO(craffel): Consider saving optimizer and scheduler state.
-        logging.info("Saving checkpoint for step %s", global_step)
-        self.save_checkpoint(global_step)
+      # if not train_step % save_steps:
+      #   # TODO(craffel): Consider saving optimizer and scheduler state.
+      #   logging.info("Saving checkpoint for step %s", global_step)
+      #   self.save_checkpoint(global_step)
       input_ids=self.to_tensor(batch["inputs"])
       attention_mask=self.to_tensor(batch["inputs_mask"])
       decoder_attention_mask=self.to_tensor(batch["targets_mask"])
@@ -382,12 +413,13 @@ class HfPyTorchModel(T5Model):
         loss, global_step = run_ort_training_step(self.args, global_step, train_step, model, batch_inputs)
         print("ort backend - train_step: {0}, global_step: {1}, loss: {2}".format(train_step, global_step - 1, loss.detach().cpu().numpy()))
         if (train_step + 1) % self.args.gradient_accumulation_steps == 0:
-          self._writer.add_scalar(
-              "loss", loss.detach().cpu().numpy(), global_step - 1
-          )
+          # self._writer.add_scalar(
+          #     "loss", loss.detach().cpu().numpy(), global_step - 1
+          # )
 
-          self._writer.add_scalar("global step/s", 1 / (time.time() - now), global_step - 1)
+          # self._writer.add_scalar("global step/s", 1 / (time.time() - now), global_step - 1)
           now = time.time()
+    logging.info("Exit Train Function Body")
     #logging.info("Saving final checkpoint for step %s", global_step)
     #self.save_checkpoint(global_step)
 
@@ -444,7 +476,7 @@ class HfPyTorchModel(T5Model):
         )
     tasks = [task for task in tasks if split in task.splits]
 
-    summary_dir = summary_dir or os.path.join(self._model_dir, f"{split}_eval")
+    summary_dir = summary_dir #or os.path.join(self._model_dir, f"{split}_eval")
     tf.io.gfile.makedirs(summary_dir)
 
     def _unbatch(batch):
@@ -512,12 +544,12 @@ class HfPyTorchModel(T5Model):
           scores = metric_fn(targets, predictions)
           for metric_name, metric_value in scores.items():
             tag = f"eval/{task.name}/{metric_name}"
-            self._writer.add_scalar(tag, metric_value, self._step)
+            # self._writer.add_scalar(tag, metric_value, self._step)
             logging.info(
                 "%s at step %d: %.3f", tag, self._step, metric_value
             )
 
-        self._writer.flush()
+        # self._writer.flush()
 
     if checkpoint_steps is None:
       _eval_current_model()
